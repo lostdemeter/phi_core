@@ -8,3 +8,7 @@ __pycache__/
 # compiled check objects (make check, /tmp)
 *.o
 c_core/luts.h
+c_core/test_bridge
+c_core/test_conv
+c_core/test_geo
+c_core/test_arith
