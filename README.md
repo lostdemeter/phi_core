@@ -7,6 +7,12 @@ spec, one lowering per substrate — so model #4 starts with wiring, not math.
 A φ-value is `sign × φ^(exponent / 512)`, φ = (1+√5)/2. On this lattice,
 multiplication is integer exponent addition; runtime needs no FPU.
 
+## The idea
+
+**[AI_CODEC_PIPELINE.md](AI_CODEC_PIPELINE.md)** — the full writeup:
+models as codecs over a shared integer language, three working
+examples, measured evidence, honest boundaries, roadmap.
+
 ## Contents
 
 - `phi_core/` — `lattice.py` (codec/bridge/LUTs), `calibrate.py`
