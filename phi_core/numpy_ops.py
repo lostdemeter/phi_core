@@ -338,3 +338,176 @@ def phi_conv(s, e, z, W, m_out, stride=1, out_ch_chunk=8, Wb=None):
 # NOTE on clamping: product exponents are clipped to [0,65535] before the
 # bridge (C port clamps in phi_add/phi_head_predict the same way); m_out is
 # the accumulator scale per M1-S2.
+
+
+# ---- promoted shared ops (extracted verbatim from diffusion_reverse/
+# unet_ops.py, proven by ITS S3 gates 14/14; third-copy trigger per the
+# ops.py rule: diffusion built them, llama needs them, so they live HERE.
+# Adaptations vs the original, both behavior-preserving: N.X references
+# rebound to this module's own names; exp_lut bakes to this package's
+# luts/ (same frozen auto-build pattern). Gated 0-diff in
+# tests/test_promoted.py. gelu/geglu stay model-side (no trigger). ----
+
+BOUND = 1 << 62  # intermediates must stay under this (4x int64 margin)
+
+
+def _assert_bound(tag, *vals):
+    mx = 0
+    for v in vals:
+        a = np.abs(np.asarray(v, dtype=np.int64))
+        if a.size:
+            mx = max(mx, int(a.max()))
+    assert mx < BOUND, f"{tag}: intermediate {mx} >= 2^62"
+
+
+def groupnorm_int(s, e, z, w, b, G, m, eps_c):
+    """GroupNorm+affine, HWC triples in/out. w,b: triples (C,).
+    eps_c: variance floor IN AMBIENT COUNTS
+    (round(eps * 2^36 / U_m^2), precomputed offline in cal)."""
+    H, W, C = s.shape
+    assert C % G == 0
+    q = S.to_fixed(s, e, z, m).astype(np.int64)
+    wq = S.to_fixed(w[0], w[1], w[2], m).astype(np.int64)
+    bq = S.to_fixed(b[0], b[1], b[2], m).astype(np.int64)
+    n = (H * W * (C // G))
+    out = np.empty_like(q)
+    for g in range(G):
+        sl = slice(g * (C // G), (g + 1) * (C // G))
+        qq = q[:, :, sl].reshape(-1)
+        mean = S.tdiv(np.sum(qq, dtype=np.int64), n)
+        dev = qq - mean
+        _assert_bound("gn:dev^2", dev)
+        var = S.tdiv(np.sum(dev * dev, dtype=np.int64), n) + eps_c
+        std = math.isqrt(int(var))  # var in 2^-36 -> std in 2^-18
+        if std == 0:
+            norm = np.zeros_like(dev)
+        else:
+            _assert_bound("gn:norm-num", dev)
+            norm = S.tdiv(dev * (1 << 18), std)
+        _assert_bound("gn:affine", norm)
+        # qq is row-major (h,w,c): channel weights tile, not repeat.
+        y = S.tdiv(norm * np.tile(wq[sl], H * W), (1 << 18))
+        y = y + np.tile(bq[sl], H * W)
+        out[:, :, sl] = y.reshape(H, W, -1)
+    so, eo, zo = S.from_fixed(out.reshape(-1), m)
+    sh = (H, W, C)
+    return so.reshape(sh), eo.reshape(sh), zo.reshape(sh)
+
+
+def int_layernorm_rows(s, e, z, w, b, m, eps_c):
+    """Per-row LayerNorm+affine, (N,C) triples in/out. w,b: triples
+    (C,). eps_c in ambient counts (see groupnorm_int)."""
+    Nn, C = s.shape
+    q = S.to_fixed(s, e, z, m).astype(np.int64)
+    wq = S.to_fixed(w[0], w[1], w[2], m).astype(np.int64)
+    bq = S.to_fixed(b[0], b[1], b[2], m).astype(np.int64)
+    out = np.empty_like(q)
+    for n in range(Nn):
+        row = q[n]
+        mean = S.tdiv(np.sum(row, dtype=np.int64), C)
+        dev = row - mean
+        var = S.tdiv(np.sum(dev * dev, dtype=np.int64), C) + eps_c
+        std = math.isqrt(int(var))
+        norm = np.zeros_like(dev) if std == 0 else S.tdiv(
+            dev * (1 << 18), std)
+        _assert_bound("ln:affine", norm)
+        out[n] = S.tdiv(norm * wq, (1 << 18)) + bq
+    so, eo, zo = S.from_fixed(out.reshape(-1), m)
+    return so.reshape(Nn, C), eo.reshape(Nn, C), zo.reshape(Nn, C)
+
+
+def matmul_int(A, B, m_acc, n_chunk=32):
+    """Batched triples matmul: A (...,N,K) x B (...,K,M) -> (...,N,M).
+    Per-product bridge at m_acc (phi_conv discipline); row-chunked."""
+    As, Ae, Az = A
+    Bs, Be, Bz = B
+    Nn, K = As.shape[-2], As.shape[-1]
+    M = Bs.shape[-1]
+    assert Bs.shape[-2] == K
+    lead = As.shape[:-2]
+    A2 = (As.reshape(-1, Nn, K), Ae.reshape(-1, Nn, K), Az.reshape(-1, Nn, K))
+    B2 = (Bs.reshape(-1, K, M), Be.reshape(-1, K, M), Bz.reshape(-1, K, M))
+    Nb = A2[0].shape[0]
+    assert B2[0].shape[0] in (1, Nb)
+    outs, oes, ozs = [], [], []
+    broadcast_b = B2[0].shape[0] == 1
+    for bi in range(Nb):
+        bb = tuple(x[0] if broadcast_b else x[bi] for x in B2)
+        acc = np.zeros((Nn, M), np.int64)
+        for i0 in range(0, Nn, n_chunk):
+            i1 = min(Nn, i0 + n_chunk)
+            nk = i1 - i0
+            for k in range(K):
+                a3 = tuple(np.broadcast_to(
+                    x[bi, i0:i1, k].reshape(nk, 1), (nk, M)) for x in A2)
+                b3 = tuple(np.broadcast_to(bb[j][k, :], (nk, M))
+                           for j in range(3))
+                pa_s = tmul(a3, b3)
+                acc[i0:i1] += to_fixed(pa_s[0], pa_s[1], pa_s[2], m_acc)
+        _assert_bound("matmul:acc", acc)
+        so, eo, zo = S.from_fixed(acc.reshape(-1), m_acc)
+        outs.append(so.reshape(Nn, M))
+        oes.append(eo.reshape(Nn, M))
+        ozs.append(zo.reshape(Nn, M))
+    sh = lead + (Nn, M)
+    return (np.stack(outs).reshape(sh).astype(np.int8),
+            np.stack(oes).reshape(sh).astype(np.int32),
+            np.stack(ozs).reshape(sh).astype(np.uint8))
+
+
+_EXP_LUT = None
+
+
+def exp_lut():
+    """EXP_LUT[d] = round(2^24 * exp(-d/2^14)), d in [0, 262144].
+    Same formula as the proven softproj 2-way softmax."""
+    global _EXP_LUT
+    if _EXP_LUT is None:
+        p = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                         "..", "luts", "exp_lut.npy")
+        try:
+            _EXP_LUT = np.load(p)
+        except Exception:
+            d = np.arange(262145, dtype=np.float64)
+            _EXP_LUT = np.round((2.0 ** 24) * np.exp(-d / 16384.0)
+                                ).astype(np.int64)
+            try:
+                os.makedirs(os.path.dirname(p), exist_ok=True)
+                np.save(p, _EXP_LUT)
+            except Exception:
+                pass
+    return _EXP_LUT
+
+
+def rescale_via_triples(q, m_from, m_to):
+    """The IR `rescale` op (only scale changer): fixed@m_from ->
+    triples -> fixed@m_to. Exact up to lattice quantum."""
+    s, e, z = S.from_fixed(q.reshape(-1), m_from)
+    return S.to_fixed(s, e, z, m_to).reshape(q.shape)
+
+
+def softmaxN_fixed(q, m):
+    """Stable N-way softmax over last axis of fixed scores @ m.
+    Scores must be ABSOLUTE (nonlinear — see M1 finding #4); callers
+    pass BIAS-scale counts, asserted here. Returns (num 2^24, den)."""
+    assert m == S.BIAS, f"softmax needs BIAS-scale counts, got m={m}"
+    s14 = S.tdiv(q.astype(np.int64), 16)  # 2^-18 -> 2^-14 (M5 contract)
+    vmax = s14.max(axis=-1, keepdims=True)
+    dd = np.clip(vmax - s14, 0, 262144).astype(np.int64)
+    num = exp_lut()[dd]
+    den = np.sum(num, axis=-1, dtype=np.int64)
+    den = np.where(den == 0, 1, den)
+    _assert_bound("softmax:den", den)
+    return num, den
+
+
+def softmaxN_triples(t):
+    """N-way softmax from triples: bridge at BIAS (absolute) -> LUT."""
+    s, e, z = t
+    q = S.to_fixed(s, e, z, S.BIAS)
+    return softmaxN_fixed(q.reshape(s.shape), S.BIAS)
+
+
+def silu_int(t):
+    """SiLU x*sigmoid(x): sigmoid_int (any range) + exact tmul."""
+    return tmul(sigmoid_int(t), t)
