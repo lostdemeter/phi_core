@@ -45,3 +45,24 @@ def calibrate_from_hooks(net, imgs01):
     for h in hooks:
         h.remove()
     return maxima
+
+
+def fold_batchnorm(conv_w, conv_b, mean, var, bn_w, bn_b, eps=1e-5):
+    """Fold inference BatchNorm into conv weights (exact, offline).
+
+    BN(x) = bw*(x-mean)/sqrt(var+eps) + bb applied after conv(x) =
+    conv_w*x + conv_b. Folded: W' = W*bw/sqrt(var+eps) (per-out-ch),
+    b' = (b-mean)*bw/sqrt(var+eps) + bb. First BN sighting across four
+    models (DDColor UNet); every future BN model inherits this.
+    Gate: folded vs torch F.batch_norm <= 1e-6 (test below pattern).
+    All inputs/outputs float64 numpy, shapes OIHW / (C,).
+    """
+    import numpy as np
+    conv_w = np.asarray(conv_w, dtype=np.float64)
+    conv_b = np.asarray(conv_b, dtype=np.float64)
+    scale = np.asarray(bn_w, dtype=np.float64) / np.sqrt(
+        np.asarray(var, dtype=np.float64) + eps)
+    W = conv_w * scale.reshape(-1, *([1] * (conv_w.ndim - 1)))
+    b = (conv_b - np.asarray(mean, dtype=np.float64)) * scale + np.asarray(
+        bn_b, dtype=np.float64)
+    return W, b
