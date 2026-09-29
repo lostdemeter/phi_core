@@ -1,3 +1,4 @@
+# Framework notes (cross-model lessons — model repos hold project-local notes)
 
 ## Model #4 lessons (DDColor census + zoo attempts — read before synthesizing)
 
