@@ -22,3 +22,13 @@
   0.05% lattice rounding lands at 48dB (gain x8 on tiny deterministic
   errors) while 1% noise lands at 6dB. Deterministic + tiny survives;
   random + 20x bigger doesn't. No paradox — linear regime throughout.
+
+- [2026-09-28] ZOO-1 (bicubic, first exact construction): per-parity tap
+  WINDOWS differ (even {-2..1}, odd {-1..2}) — a same-window version
+  silently dropped a live tap (DC 1.024). Partition-of-unity gate now
+  mandatory for resamplers. PIL differs from exact theory by 3.3e-3
+  interior on its own: gate against theory (float64 direct), use PIL
+  for display only. Lattice-vs-theory interior: 1.27e-3 smooth,
+  ~3e-3 at sharp edges (mixing rounded extremes). Lesson: reference
+  hierarchies (theory > library > third-party) must be explicit, or
+  their gaps get misattributed to our construction.
