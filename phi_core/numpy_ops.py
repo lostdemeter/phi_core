@@ -535,3 +535,12 @@ def rmsnorm_int(s, e, z, w, m, eps_c):
         out[n] = S.tdiv(norm * wq, (1 << 18))
     so, eo, zo = S.from_fixed(out.reshape(-1), m)
     return so.reshape(sh), eo.reshape(sh), zo.reshape(sh)
+
+
+def gather_int(Wt, ids):
+    """Exact row-gather: Wt (V,C) triples, ids (...) int -> (...)xC.
+    Reindex family (like concat/split): structurally gated, 0-diff
+    vs torch embedding. Promoted from llama S3 (third consumer:
+    llama, mamba, future)."""
+    ids = np.asarray(ids)
+    return (Wt[0][ids], Wt[1][ids], Wt[2][ids])

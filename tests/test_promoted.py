@@ -28,6 +28,23 @@ def triples(S, a):
     return s, e, z
 
 
+def _gather_case():
+    import phi_core.lattice as L
+    import phi_core.numpy_ops as N
+    sys.path.insert(0, os.path.join(os.path.dirname(
+        os.path.dirname(os.path.abspath(__file__))), "..", "llama_reverse"))
+    import llama_ops as LO
+
+    def triples(a):
+        s, e, z = L.encode(np.asarray(a, dtype=np.float64))
+        return s, e, z
+    rng = np.random.default_rng(6)
+    W = (rng.random((500, 12)) - 0.5) * 2
+    ids = rng.integers(0, 500, size=(3, 7))
+    a = N.gather_int(triples(W), ids)
+    c = LO.gather_int(triples(W), ids)
+    check("gather", all(bool((i == j).all()) for i, j in zip(a, c)))
+
 def main():
     import phi_core.lattice as L
     import phi_core.numpy_ops as N
@@ -91,6 +108,7 @@ def main():
     check("silu", all(bool((i == j).all()) for i, j in zip(a, c)))
 
     _rms_case()
+    _gather_case()
     print("RESULT:", "ALL OK" if not FAIL else f"FAILURES: {FAIL}")
     sys.exit(1 if FAIL else 0)
 
