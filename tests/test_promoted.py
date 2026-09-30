@@ -90,8 +90,30 @@ def main():
     c = O.silu_int(triples(L, xs))
     check("silu", all(bool((i == j).all()) for i, j in zip(a, c)))
 
+    _rms_case()
     print("RESULT:", "ALL OK" if not FAIL else f"FAILURES: {FAIL}")
     sys.exit(1 if FAIL else 0)
+
+
+def _rms_case():
+    import phi_core.lattice as L
+    import phi_core.numpy_ops as N
+    sys.path.insert(0, os.path.join(os.path.dirname(
+        os.path.dirname(os.path.abspath(__file__))), "..", "llama_reverse"))
+    import llama_ops as LO
+
+    def triples(a):
+        s, e, z = L.encode(np.asarray(a, dtype=np.float64))
+        return s, e, z
+    rng = np.random.default_rng(5)
+    x = (rng.random((6, 128)) - 0.5) * 6
+    w = (rng.random(128) - 0.5) * 2 + 0.5
+    from phi_core.calibrate import m_of
+    m = m_of(3.0)
+    ec = 4514
+    a = N.rmsnorm_int(*triples(x), triples(w), m, ec)
+    c = LO.rmsnorm_int(*triples(x), triples(w), m, ec)
+    check("rmsnorm", all(bool((i == j).all()) for i, j in zip(a, c)))
 
 
 if __name__ == "__main__":

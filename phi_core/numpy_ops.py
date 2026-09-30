@@ -511,3 +511,27 @@ def softmaxN_triples(t):
 def silu_int(t):
     """SiLU x*sigmoid(x): sigmoid_int (any range) + exact tmul."""
     return tmul(sigmoid_int(t), t)
+
+
+def rmsnorm_int(s, e, z, w, m, eps_c):
+    """Per-row RMSNorm+weight, (...,C) triples in/out. w: triples (C,).
+    eps_c in ambient counts (epsc rule). Promoted from llama S3 (third
+    copy incl. DAV2's variant — trigger per ops.py rule); 0-diff gate
+    in tests/test_promoted.py."""
+    sh = s.shape
+    C = sh[-1]
+    q = S.to_fixed(s, e, z, m).astype(np.int64)
+    wq = S.to_fixed(w[0], w[1], w[2], m).astype(np.int64)
+    flat = q.reshape(-1, C)
+    out = np.empty_like(flat)
+    for n in range(flat.shape[0]):
+        row = flat[n]
+        _assert_bound("rms:sq", row)
+        ms = S.tdiv(np.sum(row * row, dtype=np.int64), C) + eps_c
+        rms = math.isqrt(int(ms))  # 2^-36 -> 2^-18
+        norm = np.zeros_like(row) if rms == 0 else S.tdiv(
+            row * (1 << 18), rms)
+        _assert_bound("rms:affine", norm)
+        out[n] = S.tdiv(norm * wq, (1 << 18))
+    so, eo, zo = S.from_fixed(out.reshape(-1), m)
+    return so.reshape(sh), eo.reshape(sh), zo.reshape(sh)
