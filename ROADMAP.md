@@ -65,7 +65,17 @@ family, novelty-budgeted, in this order (coverage-per-effort):
     tiled lowering, promoted with generality proof); K2 log1pexp
     rejected with evidence; abar/softplus compose from primitives.
 3. **Modern CNN details**: ConvNeXt-V2 GRN, deformable convs
-   (data-dependent indexing — the other genuinely-new class). Bounded.
+    (data-dependent indexing — the other genuinely-new class). Bounded.
+    STATUS 2026-09-30: PORTED — ConvNeXtV2-atto full integer classify
+    (3/3 top-1, logits 27.6/27.6/34.3dB; block 46.3dB) + Deformable-DETR
+    MSDeformAttn 51.8dB on real backbone features. Novelty K=0 (+1 erf
+    table, precedent): deformable sampling composes (coords-as-inputs),
+    GRN/frozen-BN compose, GELU exact via PHI LUT (tanh rejected with
+    evidence). Honest substitution recorded: deformable ATTENTION for
+    deformable CONV (InternImage needs custom CUDA + remote code;
+    op class identical). Calibration lessons: per-block M-dict at
+    1000x GRN dynamic range; downsample M covers SOURCE peak.
+    Phase-3 item CLOSED — coverage exit (7 families) holds.
 - Process (already adopted): mandatory RECON novelty report —
   required N / shared M / new K + justification; promote by evidence
   (≥2 consumers or 1 + generality proof), never speculatively.
