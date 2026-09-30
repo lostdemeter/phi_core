@@ -109,8 +109,64 @@ def main():
 
     _rms_case()
     _gather_case()
+    _scan_case()
     print("RESULT:", "ALL OK" if not FAIL else f"FAILURES: {FAIL}")
     sys.exit(1 if FAIL else 0)
+
+
+def _scan_case():
+    """K1 scan_step + tiled_scan: 0-diff vs mamba_reverse/mamba_ops.
+    Extraction proof only (fidelity lives in mamba S3/S5 gates):
+    identical fixed-point inputs -> bit-identical outputs.
+    Edges: zero state, abar=1.0 hold, abar~0 full-forget, N=1,
+    N<tile, tile=1 (correction path stressed every step)."""
+    import phi_core.lattice as L
+    import phi_core.numpy_ops as N
+    import os as _os
+    import sys as _sys
+    _sys.path.insert(0, _os.environ.get("MAMBA", _os.path.join(_os.path.dirname(
+        _os.path.dirname(_os.path.abspath(__file__))), "..", "mamba_reverse")))
+    import mamba_ops as G
+    from phi_core.calibrate import m_of
+
+    rng = np.random.default_rng(7)
+    m = m_of(4.0)
+
+    def triples(a):
+        s, e, z = L.encode(np.asarray(a, dtype=np.float64))
+        return s, e, z
+
+    def fq(v):
+        return L.to_fixed(*triples(v), m).astype(np.int64)
+
+    def fq1(v):
+        return L.to_fixed(*triples(v), L.BIAS).astype(np.int64)
+
+    # scan_step: random + edge rows (hold / forget / zero-state)
+    h = (rng.random((8, 16)) - 0.5) * 4
+    a = 0.9 + rng.random((8, 16)) * 0.09
+    bx = (rng.random((8, 16)) - 0.5) * 2
+    h = np.vstack([h, np.zeros((1, 16)), h[:1]])
+    a = np.vstack([a, np.ones((1, 16)), np.zeros((1, 16))])
+    bx = np.vstack([bx, bx[:1], np.zeros((1, 16))])
+    got = N.scan_step_int(fq(h), fq1(a), fq(bx))
+    want = G.scan_step_int(fq(h), fq1(a), fq(bx))
+    check("scan-step", bool((got == want).all()))
+
+    # tiled_scan: several tiles incl. degenerate schedules
+    Nt, Dd, Ss = 48, 8, 4
+    ab = 0.9 + rng.random((Nt, Dd, Ss)) * 0.09
+    bxx = (rng.random((Nt, Dd, Ss)) - 0.5) * 2
+    aq = fq(ab)
+    bq = fq(bxx)
+    for tile in (1, 7, 16, Nt, Nt + 5):
+        got = N.tiled_scan(aq, bq, m, tile=tile)
+        want = G.tiled_scan(aq, bq, m, tile=tile)
+        check(f"tiled-scan-t{tile}", bool((got == want).all()))
+    # N=1 single step
+    got = N.tiled_scan(aq[:1], bq[:1], m, tile=8)
+    want = G.tiled_scan(aq[:1], bq[:1], m, tile=8)
+    check("tiled-scan-N1", bool((got == want).all()))
 
 
 def _rms_case():

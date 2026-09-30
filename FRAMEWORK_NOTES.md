@@ -32,3 +32,22 @@
   ~3e-3 at sharp edges (mixing rounded extremes). Lesson: reference
   hierarchies (theory > library > third-party) must be explicit, or
   their gaps get misattributed to our construction.
+
+- [2026-09-30] MASKED-CONTRACTS (from mamba S4/S6, now IR discipline):
+  three rules that each caught a real fiction. (1) MASKED EXACT-ZERO:
+  masked-out positions (conv pads, scan pre-history, attention sinks)
+  must be structural zeros BEFORE the bridge, not small residues —
+  a 53dB residue in conv prepad cost 8dB of block parity. (2)
+  KEPT-ONLY VMAX: reductions over masked domains take max over kept
+  entries only; the full-tensor max leaks attenuated masked values
+  into every output. (3) SHAPE-STRICT COMPARE (cmpdb pattern): parity
+  harnesses must assert shapes, never broadcast — numpy broadcasting
+  fabricated a 137–220dB "pass" in a throwaway probe (gates were
+  always clean; the probe lied, not the model). Corollary, the
+  fourth fiction class: CROSS-MODEL COPY-PASTE of evidence (llama's
+  determinism/causal numbers briefly cited in mamba's S6 record —
+  caught on review, struck). Agreement counts in greedy twins are
+  chaos-dominated: report flip point + pre-flip dB, never bare
+  agreement (a ~50dB-level numeric shift moved the flip 9→2 with
+  identical code discipline). Rerun determinism (bit-for-bit replay)
+  is the honest determinism gate.

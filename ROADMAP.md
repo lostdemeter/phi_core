@@ -57,8 +57,13 @@ family, novelty-budgeted, in this order (coverage-per-effort):
    RoPE + GQA, all composing from existing primitives. Budget: ≤2 new.
    Unlocks the LLM world; text encoders (CLIP-L) fall out as a corollary.
 2. **Mamba/SSM** (genuinely-new lowering stress test): selective scan
-   is the first op class outside current patterns. Budget: ≤3 new.
-   Worth it precisely as IR stress (like warps once were).
+    is the first op class outside current patterns. Budget: ≤3 new.
+    Worth it precisely as IR stress (like warps once were).
+    STATUS 2026-09-30: PORTED — mamba-130m full integer port gated
+    (block 72dB, tiled scan 94.6dB, drift sublinear per contraction
+    theory, 50-token demo + transcript). Novelty K=1 (`scan_step` +
+    tiled lowering, promoted with generality proof); K2 log1pexp
+    rejected with evidence; abar/softplus compose from primitives.
 3. **Modern CNN details**: ConvNeXt-V2 GRN, deformable convs
    (data-dependent indexing — the other genuinely-new class). Bounded.
 - Process (already adopted): mandatory RECON novelty report —

@@ -544,3 +544,101 @@ def gather_int(Wt, ids):
     llama, mamba, future)."""
     ids = np.asarray(ids)
     return (Wt[0][ids], Wt[1][ids], Wt[2][ids])
+
+
+# ---- K1 scan_step (promoted verbatim from mamba_reverse/mamba_ops.py,
+# proven by ITS S3 gates + S5 tiled/drift gates; the first genuinely-new
+# IR op class: order-sensitive recurrence with its schedule in the
+# contract. Generality proof = Track B exhibits (associativity,
+# prefix-composition tree==seq, contraction bound holding as envelope).
+# Adaptations vs the original, both behavior-preserving: _assert_bound
+# rebound to this module's own (identical BOUND/formula); S.* already
+# this package's lattice. Gated 0-diff in tests/test_promoted.py.
+# abar discretization (abar_int) and softplus NOT promoted: both compose
+# from existing primitives (EXP_LUT + tmul + EXPACT gather, S3-gated);
+# K2 log1pexp was rejected with evidence. depthwise1d NOT promoted:
+# grouped lowering already covered (DDColor K pattern). ----
+
+
+def scan_step_int(h_q, abar_q, bx_q):
+    """One fixed-point scan step: h' = Abar*h + Bx.
+    CONTRACT: Abar is DIMENSIONLESS and arrives at BIAS (absolute
+    2^-18); h/Bx arrive at m_state. (Sharing one m would err by 1/U —
+    same pattern as AV's num/den ratios; S3-gated.) Products exact
+    (Python ints in reference), tdiv, bound asserts. C port uses
+    __int128 + same asserts."""
+    _assert_bound("scan:h-prod", abar_q, h_q)
+    h2 = S.tdiv(abar_q.astype(object) * h_q.astype(object), (1 << 18))
+    out = np.asarray(h2, dtype=np.int64) + bx_q.astype(np.int64)
+    _assert_bound("scan:out", out)
+    return out
+
+
+def tiled_scan(abar_q, bx_q, m_state, tile=8):
+    """Two-level tiled scan (Q3-analog for recurrence): per-tile local
+    scans from zero (PARALLELIZABLE across tiles) + sequential prefix
+    correction over tiles + broadcast correct. Same tdiv-per-multiply
+    discipline as scan_step_int, so grouping differs -> gate is
+    tight-dB (not 0-diff): rounding order is semantics here, and the
+    IR schedule rule says exactly that (order-sensitive ops carry
+    their schedule in the contract).
+    abar_q (N,D,S) BIAS counts (dimensionless); bx_q (N,D,S) @ m_state.
+    Returns state trajectory (N,D,S) int64 @ m_state. m_state unused
+    except signature uniformity (scales live in the counts already).
+    """
+    _ = m_state
+    N = abar_q.shape[0]
+    D, St = abar_q.shape[1], abar_q.shape[2]
+    F = (1 << 18)
+    # per-tile local scans from zero (PARALLELIZABLE across tiles),
+    # PLUS tile-local A-prefix products (needed for correction below).
+    locs, Aprefs = [], []
+    for k0 in range(0, N, tile):
+        k1 = min(N, k0 + tile)
+        h = np.zeros((D, St), dtype=np.int64)
+        traj = np.empty((k1 - k0, D, St), dtype=np.int64)
+        Ap = np.empty((k1 - k0, D, St), dtype=np.int64)
+        runA = np.full((D, St), F, dtype=np.int64)
+        for t in range(k0, k1):
+            h = scan_step_int(h, abar_q[t], bx_q[t])
+            traj[t - k0] = h
+            runA = S.tdiv(runA.astype(object)
+                          * abar_q[t].astype(object), F).astype(np.int64)
+            Ap[t - k0] = runA
+        locs.append(traj)
+        Aprefs.append(Ap)
+    # prefix aggregates via the associative operator, sequential over
+    # the (few) tiles: (A,B) o (A',B') as in B4.
+    outs = np.zeros((N, D, St), dtype=np.int64)
+    PA = np.full((D, St), F, dtype=np.int64)  # identity: A=1
+    PB = np.zeros((D, St), dtype=np.int64)
+    for (k0, traj, Ap) in zip(range(0, N, tile), locs, Aprefs):
+        k1 = min(N, k0 + tile)
+        # CORRECT correction: h_t = A_tilepref(t)*PB_prev + l_t.
+        # (An earlier revision used PA*l + PB — prefix and tile roles
+        # swapped — caught by hand on [1,2.5,4.25,6.125]. PB carries
+        # all cross-tile history; the tile-local A-prefix scales it.)
+        corr = S.tdiv(Ap.astype(object)
+                      * np.broadcast_to(PB[None, :, :], Ap.shape).astype(
+                          object), F)
+        corr = np.asarray(corr, dtype=np.int64) + traj
+        outs[k0:k1] = corr
+        # advance prefix by this tile's aggregate: recompute the
+        # tile aggregate from its pairs (exact operator, tdiv each).
+        Ak = np.full((D, St), F, dtype=np.int64)
+        Bk = np.zeros((D, St), dtype=np.int64)
+        for t in range(k0, k1):
+            # combine ((Ak,Bk) , (abar,bx)): A' = abar*Ak/F,
+            # B' = abar*Bk/F + bx  — written stepwise for audit:
+            Ak = S.tdiv(abar_q[t].astype(object) * Ak.astype(object),
+                        F).astype(np.int64)
+            Bk = S.tdiv(abar_q[t].astype(object) * Bk.astype(object),
+                        F).astype(np.int64) + bx_q[t].astype(np.int64)
+        _assert_bound("tiled:prefix", Ak, Bk)
+        # compose prefix P (earlier) with tile T (later):
+        # P' = (Ak*PA, Ak*PB + Bk) — OLD PA/PB on the right:
+        PB = S.tdiv(Ak.astype(object) * PB.astype(object),
+                    F).astype(np.int64) + Bk.astype(np.int64)
+        PA = S.tdiv(PA.astype(object) * Ak.astype(object),
+                    F).astype(np.int64)
+    return outs
