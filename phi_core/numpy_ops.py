@@ -346,7 +346,10 @@ def phi_conv(s, e, z, W, m_out, stride=1, out_ch_chunk=8, Wb=None):
 # Adaptations vs the original, both behavior-preserving: N.X references
 # rebound to this module's own names; exp_lut bakes to this package's
 # luts/ (same frozen auto-build pattern). Gated 0-diff in
-# tests/test_promoted.py. gelu/geglu stay model-side (no trigger). ----
+# tests/test_promoted.py. gelu (erf form) PROMOTED from convnext S3
+# (trigger fired: ConvNeXt-V2 block + generality over all erf-gelu
+# models); tanh-approx stays rejected (measured 1.9e-2); geglu stays
+# model-side (no trigger). ----
 
 BOUND = 1 << 62  # intermediates must stay under this (4x int64 margin)
 
@@ -642,3 +645,56 @@ def tiled_scan(abar_q, bx_q, m_state, tile=8):
         PA = S.tdiv(PA.astype(object) * Ak.astype(object),
                     F).astype(np.int64)
     return outs
+
+
+# ---- gelu-erf (promoted verbatim from convnext_reverse/cx_ops.py,
+# proven by ITS S3 gate 6.7e-4 vs torch erf-gelu; trigger = ConvNeXt-V2
+# block use + generality (every erf-gelu model: BERT/GPT/ViT/ConvNeXt).
+# A frozen TABLE (same pattern as sig_lut/sp_lut) + EXPACT gather +
+# tmul-scale — 0 new opcodes. tanh-approx rejected with evidence
+# (max abs 1.9e-2 at |x|=2). Gated 0-diff in tests/test_promoted.py. ----
+
+GELU_SPAN = 16 * 16384  # erf-LUT span at 2^-14
+_PHI_LUT = None
+
+
+def phi_lut():
+    """PHI_LUT: round(Phi(x)*2^14), x in 2^-14 over [-16,16].
+    Phi(x) = 0.5*(1+erf(x/sqrt(2))) — the /sqrt(2) is load-bearing
+    (first revision omitted it; unit curve caught it).
+    Asymptotes: x<=-16 -> 0, x>=16 -> 1 (exact). Offline-built frozen."""
+    global _PHI_LUT
+    if _PHI_LUT is None:
+        p = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                         "..", "luts", "phi_lut.npy")
+        try:
+            _PHI_LUT = np.load(p)
+        except Exception:
+            import math as _math
+            k = np.arange(2 * GELU_SPAN + 1, dtype=np.float64)
+            x = (k - GELU_SPAN) / 16384.0
+            Phi = 0.5 * (1.0 + np.vectorize(_math.erf)(
+                x / math.sqrt(2.0)))
+            _PHI_LUT = np.round(Phi * 16384).astype(np.int64)
+            try:
+                os.makedirs(os.path.dirname(p), exist_ok=True)
+                np.save(p, _PHI_LUT)
+            except Exception:
+                pass
+    return _PHI_LUT
+
+
+def gelu_erf_int(t):
+    """GELU exact-form: x*Phi(x) via EXPACT gather + PHI LUT + scale.
+    x14 (any range) -> p14 = Phi LUT -> y14 = tdiv(x14*p14, 2^14)."""
+    s, e, z = t
+    X = sigx_lut()
+    e = np.clip(t[1].astype(np.int64), 0, 65535)
+    x14 = np.where(t[2].astype(bool), 0, t[0].astype(np.int64) * X[e])
+    G = phi_lut()
+    idx = np.clip(x14 + GELU_SPAN, 0, len(G) - 1)
+    p14 = np.where(x14 < -GELU_SPAN, 0, np.where(
+        x14 > GELU_SPAN, 16384, G[idx]))
+    y14 = S.tdiv(x14.astype(object) * p14.astype(object), 16384)
+    y14 = np.asarray(y14, dtype=np.int64)
+    return S.from_fixed(y14 * np.int64(16), S.BIAS)

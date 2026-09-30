@@ -110,6 +110,7 @@ def main():
     _rms_case()
     _gather_case()
     _scan_case()
+    _gelu_case()
     print("RESULT:", "ALL OK" if not FAIL else f"FAILURES: {FAIL}")
     sys.exit(1 if FAIL else 0)
 
@@ -167,6 +168,29 @@ def _scan_case():
     got = N.tiled_scan(aq[:1], bq[:1], m, tile=8)
     want = G.tiled_scan(aq[:1], bq[:1], m, tile=8)
     check("tiled-scan-N1", bool((got == want).all()))
+
+
+def _gelu_case():
+    """gelu-erf + phi_lut: 0-diff vs convnext_reverse/cx_ops.
+    Edge-heavy: asymptotes (>|16|), LUT seams (+-16), mid curve, zero."""
+    import phi_core.lattice as L
+    import phi_core.numpy_ops as N
+    import os as _os
+    import sys as _sys
+    _sys.path.insert(0, _os.environ.get("CONVNEXT", _os.path.join(
+        _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))),
+        "..", "convnext_reverse")))
+    import cx_ops as G
+
+    def triples(a):
+        s, e, z = L.encode(np.asarray(a, dtype=np.float64))
+        return s, e, z
+    rng = np.random.default_rng(8)
+    x = np.concatenate([(rng.random(300) - 0.5) * 20,
+                        [-25., -16., -15.999, 0., 15.999, 16., 25.]])
+    a = N.gelu_erf_int(triples(x))
+    c = G.gelu_erf_int(triples(x))
+    check("gelu-erf", all(bool((i == j).all()) for i, j in zip(a, c)))
 
 
 def _rms_case():
