@@ -489,6 +489,59 @@ def rescale_via_triples(q, m_from, m_to):
     return S.to_fixed(s, e, z, m_to).reshape(q.shape)
 
 
+WIDE_CAP = 8192  # d in [-8192,0): |v| above U_m to ~2200 served exact
+_FRAC_HI = None
+
+
+def frac_hi_lut():
+    """Above-range bridge table (T-transform): round(2^18*PHI^(k/512)),
+    k=1..WIDE_CAP. to_fixed folds d<0 to +-1.0 (silent for |v|>U_m); the
+    wide path serves those magnitudes exactly instead. Same load-or-build
+    frozen pattern as its neighbors (luts/frac_hi_lut.npy)."""
+    global _FRAC_HI
+    if _FRAC_HI is None:
+        p = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                         "..", "luts", "frac_hi_lut.npy")
+        try:
+            _FRAC_HI = np.load(p)
+        except Exception:
+            _FRAC_HI = np.round(np.power(
+                S.PHI, np.arange(1, WIDE_CAP + 1, dtype=np.float64) / S.K
+                ) * (1 << 18)).astype(np.int64)
+            try:
+                os.makedirs(os.path.dirname(p), exist_ok=True)
+                np.save(p, _FRAC_HI)
+            except Exception:
+                pass
+    return _FRAC_HI
+
+
+def to_fixed_wide(s, e, z, m):
+    """to_fixed with the above-range branch served, not folded: d in
+    [-WIDE_CAP,0) reads G[-d] (exact for lattice values, +-0.5 count like
+    the F side); d < -WIDE_CAP keeps the existing fold (documented edge,
+    same convention). to_fixed itself UNTOUCHED -- this is additive:
+    on in-range inputs the two agree bit-exactly (gated).
+    Enables full-range softmax (ai/t-transform-bridge): max-sub composition
+    bridges shifted rows spanning [-range,0] with range >> 1, which the
+    fold corrupts and the wide path serves. Counts stay absolute 2^-18,
+    so softmaxN_fixed's m==BIAS contract holds unchanged."""
+    s = np.ascontiguousarray(s)
+    e = np.ascontiguousarray(e)
+    z = np.ascontiguousarray(z)
+    d = np.asarray(m, dtype=np.int64) - e.astype(np.int64)
+    F = S.L_FRAC()
+    base = F[0]
+    G = frac_hi_lut()
+    q_lo = np.where(d < -WIDE_CAP, s.astype(np.int64) * base,
+                    s.astype(np.int64) * G[np.clip(-d, 1, WIDE_CAP) - 1])
+    out = np.where(z.astype(bool), 0, np.where(
+        d < 0, q_lo, np.where(
+            d > S.FRAC_CAP, 0,
+            s.astype(np.int64) * F[np.clip(d, 0, S.FRAC_CAP)])))
+    return out.astype(np.int64)
+
+
 def softmaxN_fixed(q, m):
     """Stable N-way softmax over last axis of fixed scores @ m.
     Scores must be ABSOLUTE (nonlinear — see M1 finding #4); callers
